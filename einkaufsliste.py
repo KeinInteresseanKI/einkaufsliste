@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import datetime
-
-# from streamlit_gsheets.gsheets_connection import GSheetsConnection  # この行は削除
-# from st_gsheets_connection.connection import GSheetsConnection  # この行も削除
+import gspread
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title='EINKAUFSLISTE', page_icon='🛒')
 
@@ -12,30 +11,72 @@ sp_item = ['トマト', '人参', 'レタス','ねぎ','ラディッシュ','タ
            'Frischkäse', '砂糖', '塩', 'こしょう / つぶ', 'こしょう / 粉', '食器洗剤', 'コンソメ - Penny']
 jp_item = ['しょうゆ', 'ごま油', '牡蠣ソース', 'みりん', 'テンメンジャン', 'サンバル']
 
-# --- Google Sheets 読み込み ---
-# st.connection() を使用し、type="gsheets" を指定します
-conn = st.connection("gsheets", type="gsheets")
+# --- Google Sheets 接続 (gspread を使用) ---
+# Secrets から認証情報を読み込む
+credentials_info = st.secrets["gcp_service_account"] 
+
+# gspread の認証スコープ
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+
+# サービスアカウント認証
+credentials = Credentials.from_service_account_info(credentials_info, scopes=scope)
+gc = gspread.authorize(credentials)
+
+# Google スプレッドシートのオブジェクトを取得（スプレッドシート名を指定）
+spreadsheet_name = "EINKAUF" # <-- あなたのGoogleスプレッドシート名に置き換える
+try:
+    sh = gc.open(spreadsheet_name)
+    worksheet = sh.worksheet("EINKAUF") # <-- あなたのワークシート名に置き換える
+except gspread.exceptions.SpreadsheetNotFound:
+    st.error(f"スプレッドシート '{spreadsheet_name}' が見つかりません。名前を確認してください。")
+    st.stop()
+except gspread.exceptions.WorksheetNotFound:
+    st.error(f"ワークシート 'EINKAUF' が見つかりません。名前を確認してください。")
+    st.stop()
+
 
 # --- DBの読み込み (キャッシュを無効化) ---
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5) 
 def load_df():
-    df = conn.read(worksheet="EINKAUF", usecols=list(range(2)))
-
-    if df.empty or not all(col in df.columns for col in ["item", "date"]):
+    data = worksheet.get_all_values()
+    
+    if not data:
         return pd.DataFrame(columns=["item", "date"])
-
+    
+    headers = data[0]
+    df = pd.DataFrame(data[1:], columns=headers)
+    
+    required_cols = ["item", "date"]
+    if not all(col in df.columns for col in required_cols):
+        st.warning("スプレッドシートのヘッダーに 'item' または 'date' 列が見つかりません。")
+        return pd.DataFrame(columns=required_cols)
+    
+    df = df[required_cols]
+    
     df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
     return df
 
 # --- ヘルパー関数: Google Sheetsを更新し、キャッシュをクリアして再読み込み ---
 def update_gsheet_and_rerun(df_to_write):
-    conn.update(worksheet="EINKAUF", data=df_to_write)
+    # ここに修正を加えます
+    # Google Sheetsに書き込む前に日付列を文字列に変換
+    df_for_gsheet = df_to_write.copy() # オリジナルのDataFrameを変更しないためにコピー
+    # datetime.date オブジェクトを 'YYYY-MM-DD' 形式の文字列に変換
+    df_for_gsheet['date'] = df_for_gsheet['date'].apply(lambda x: x.isoformat() if isinstance(x, datetime.date) else x)
+    
+    # DataFrame を gspread が書き込める形式に変換
+    data_to_write = [df_for_gsheet.columns.tolist()] + df_for_gsheet.values.tolist()
+    
+    # シートをクリアしてから書き込む
+    worksheet.clear()
+    worksheet.update(data_to_write)
+    
     st.cache_data.clear()
     st.rerun()
 
 def add_item(item):
     df = load_df()
-    today = datetime.date.today().isoformat()
+    today = datetime.date.today().isoformat() # ISO形式の文字列として追加
     new_row = pd.DataFrame([[item, today]], columns=["item", "date"])
     updated_df = pd.concat([df, new_row], ignore_index=True)
     update_gsheet_and_rerun(updated_df)
@@ -43,6 +84,7 @@ def add_item(item):
 def update_item(idx, new_item):
     df = load_df()
     df.loc[idx, "item"] = new_item
+    
     if 'edit_idx' in st.session_state:
         del st.session_state.edit_idx 
     update_gsheet_and_rerun(df)
@@ -50,6 +92,7 @@ def update_item(idx, new_item):
 def delete_item(idx):
     df = load_df()
     df = df.drop(index=idx).reset_index(drop=True)
+    
     if 'del_idx' in st.session_state:
         del st.session_state.del_idx
     update_gsheet_and_rerun(df)
@@ -88,7 +131,7 @@ if 'edit_idx' in st.session_state and st.session_state.edit_idx is not None:
         ae_re_od_ir = st.radio('Reguläres oder Irreguläres Item',
                                  ['Reguläres - Supermarkt neu', 'Reguläres - JP-Laden neu', 'Sonstiges neu'],
                                  horizontal=True, key=f'edit_radio_{i}')
-
+        
         new_item = None
         if ae_re_od_ir == 'Reguläres - Supermarkt neu':
             new_item = st.selectbox(f'Neues Item auswählen - Aktuell: {old_item}', sp_item, index=None, placeholder='Supermarkt-Item auswählen', key=f'edit_sp_select_{i}')
@@ -96,7 +139,7 @@ if 'edit_idx' in st.session_state and st.session_state.edit_idx is not None:
             new_item = st.selectbox(f'Neues Item auswählen - Aktuell: {old_item}', jp_item, index=None, placeholder='JP-Laden-Item auswählen', key=f'edit_jp_select_{i}')
         else:
             new_item = st.text_input(f'Neues Item eingeben - Aktuell: {old_item}', placeholder='Item eingeben', key=f'edit_text_input_{i}')
-
+        
         col1, col2 = st.columns([1, 4])
         with col1:
             if st.button('👌 Ändern', key=f'confirm_edit_{i}') and new_item:
