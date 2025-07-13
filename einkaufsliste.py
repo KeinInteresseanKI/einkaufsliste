@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import datetime
-from streamlit_gsheets import GSheetsConnection
+from streamlit_gsheets.gsheets_connection import GSheetsConnection
 
 st.set_page_config(page_title='EINKAUFSLISTE', page_icon='🛒')
 
